@@ -1,64 +1,94 @@
-import "dotenv/config";
-import fs from "node:fs";
-import { type ModelMessage } from "ai";
-import { createOpenAI } from "@ai-sdk/openai";
-import { createMockModel } from "./mock-model";
-import { createInterface } from "node:readline";
-import { agentLoop } from "./agent/loop";
-import { allTools } from "./tools/index";
-import { MockMCPClient } from "./tools/mcp-client";
-import { SessionStore } from "./session/store";
-import { ToolRegistry } from "./tools/registry";
-import {
-  coreRules,
-  deferredTools,
-  PromptBuilder,
-  PromptContext,
-  sessionContext,
-  toolGuide,
-} from "./context/prompt-builder";
-import { estimateMessageTokens } from "./context/defense";
-import { UsageTracker } from "./usage/tracker";
-import { CommandContext, createDispatcher } from "./commands";
-import { createMemoryTool } from "./tools/memory-tools";
-import { MemoryStore } from "./memory/store";
-import {
-  createDashScopeEmbedder,
-  createMockEmbedder,
-  embed,
-} from "./rag/embedder";
-import { createToolSearchTool } from "./tools/tool-search";
-import { createRagTools } from "./tools/rag-tools";
-import { chunkDocument } from "./rag/chunker";
-import { memoryContext, ragContext } from "./context/prompt-pipes";
-import { ragCommands } from "./commands/rag";
-import { memoryCommands } from "./commands/memory";
-import { contextCommands } from "./commands/context";
-import { debugCommands } from "./commands/debug";
-import { VectorStore } from "./rag/store";
-import { SkillLoader } from "./skills/loader";
-import { dreamCommands } from "./commands/dream";
-import { createSkillCommands } from "./commands/skill";
-import { PluginManager } from "./plugins/manager";
-import { PluginDefinition } from "./plugins/types";
-import { supabasePlugin } from "./plugins/supabase-plugin";
-import { createPluginCommands } from "./commands/plugin";
-import { ChannelGateway } from "./channels/gateway";
-import { FeishuChannel } from "./channels/feishu";
-import { createChannelCommands } from "./commands/channel";
-import { HookPipeline } from "./security/hooks";
-import { createSecurityCommands } from "./commands/security";
-import { CronService } from "./cron/service";
-import { createCronTool } from "./tools/cron-tools";
-import { createCronCommands } from "./commands/cron";
-import { any } from "zod";
-import { SpawnContext } from "./agents/spawn";
-import { createSpawnTool } from "./tools/spawn-tools";
-import { SubAgentRegistry } from "./agents/registry";
-import { createAgentCommands } from "./commands/agents";
-import { SuperAgentConfig } from "./config/schema";
-import { loadConfig } from "./config/loader";
+// ===== 环境与第三方基础库 =====
+import "dotenv/config"; // 启动时自动加载 .env 中的环境变量（如 API Key）
+import fs from "node:fs"; // Node 文件系统模块（读写本地文件）
+import { type ModelMessage } from "ai"; // AI SDK 的消息类型定义
+import { createOpenAI } from "@ai-sdk/openai"; // 创建 OpenAI 兼容的模型提供者
+import { createMockModel } from "./mock-model"; // 无 API Key 时使用的假模型（离线测试）
+import { createInterface } from "node:readline"; // 命令行交互界面（REPL 输入）
 
+// ===== Agent 核心循环与会话 =====
+import { agentLoop } from "./agent/loop"; // Agent 主循环：模型调用 + 工具执行的循环驱动
+import { allTools } from "./tools/index"; // 内置工具集合（文件、命令等）
+import { MockMCPClient } from "./tools/mcp-client"; // MCP 协议的模拟客户端
+import { SessionStore } from "./session/store"; // 会话持久化存储（消息历史的保存/恢复）
+import { ToolRegistry } from "./tools/registry"; // 工具注册表：统一管理工具的注册与查找
+
+// ===== 提示词（Prompt）构建与上下文防御 =====
+import {
+  coreRules, // 核心规则提示片段
+  deferredTools, // 延迟加载的工具说明
+  PromptBuilder, // 提示词构建器：组合各片段生成系统提示词
+  PromptContext, // 构建提示词时所需的上下文类型
+  sessionContext, // 会话信息提示片段
+  toolGuide, // 工具使用指南提示片段
+} from "./context/prompt-builder";
+import { estimateMessageTokens } from "./context/defense"; // 估算消息的 token 数（上下文超长防御）
+import { UsageTracker } from "./usage/tracker"; // token 用量统计跟踪器
+
+// ===== 斜杠命令系统 =====
+import { CommandContext, createDispatcher } from "./commands"; // 命令上下文类型与命令分发器
+
+// ===== 记忆系统 =====
+import { createMemoryTool } from "./tools/memory-tools"; // 提供给模型的记忆读写工具
+import { MemoryStore } from "./memory/store"; // 记忆存储层
+
+// ===== RAG 检索增强（向量化 + 检索） =====
+import {
+  createDashScopeEmbedder, // DashScope（阿里云）向量嵌入器
+  createMockEmbedder, // 模拟嵌入器（无 Key 时测试用）
+  embed, // 通用嵌入函数
+} from "./rag/embedder";
+import { createToolSearchTool } from "./tools/tool-search"; // 工具检索工具（按语义搜索可用工具）
+import { createRagTools } from "./tools/rag-tools"; // RAG 相关工具（知识库查询等）
+import { chunkDocument } from "./rag/chunker"; // 文档分块器：将文档切分为适合嵌入的片段
+
+// ===== 提示词管道（把记忆/RAG 结果注入上下文） =====
+import { memoryContext, ragContext } from "./context/prompt-pipes";
+
+// ===== 各类斜杠命令实现 =====
+import { ragCommands } from "./commands/rag"; // RAG 知识库命令
+import { memoryCommands } from "./commands/memory"; // 记忆管理命令
+import { contextCommands } from "./commands/context"; // 上下文查看/管理命令
+import { debugCommands } from "./commands/debug"; // 调试命令
+import { VectorStore } from "./rag/store"; // 向量数据库（存储与相似度检索）
+
+// ===== 技能（Skills）系统 =====
+import { SkillLoader } from "./skills/loader"; // 技能加载器：发现并加载技能定义
+import { dreamCommands } from "./commands/dream"; // dream 命令（记忆整理/反思类）
+import { createSkillCommands } from "./commands/skill"; // 技能管理命令
+
+// ===== 插件系统 =====
+import { PluginManager } from "./plugins/manager"; // 插件管理器：加载与生命周期管理
+import { PluginDefinition } from "./plugins/types"; // 插件定义的类型
+import { supabasePlugin } from "./plugins/supabase-plugin"; // 内置 Supabase 插件
+import { createPluginCommands } from "./commands/plugin"; // 插件管理命令
+
+// ===== 消息渠道接入 =====
+import { ChannelGateway } from "./channels/gateway"; // 渠道网关：统一收发各平台消息
+import { FeishuChannel } from "./channels/feishu"; // 飞书渠道接入
+import { createChannelCommands } from "./commands/channel"; // 渠道管理命令
+
+// ===== 安全钩子 =====
+import { HookPipeline } from "./security/hooks"; // 钩子管道：在关键操作前后执行安全检查
+import { createSecurityCommands } from "./commands/security"; // 安全相关命令
+
+// ===== 定时任务（Cron） =====
+import { CronService } from "./cron/service"; // 定时任务调度服务
+import { createCronTool } from "./tools/cron-tools"; // 提供给模型的定时任务工具
+import { createCronCommands } from "./commands/cron"; // 定时任务管理命令
+import { any } from "zod"; // zod 的 any 类型（注意：疑似误导入，未使用可删除）
+
+// ===== 子 Agent（多智能体） =====
+import { SpawnContext } from "./agents/spawn"; // 子 Agent 派生上下文
+import { createSpawnTool } from "./tools/spawn-tools"; // 提供给模型的子 Agent 派生工具
+import { SubAgentRegistry } from "./agents/registry"; // 子 Agent 注册表
+import { createAgentCommands } from "./commands/agents"; // 子 Agent 管理命令
+
+// ===== 配置 =====
+import { SuperAgentConfig } from "./config/schema"; // 配置的 TypeScript 类型定义
+import { loadConfig } from "./config/loader"; // 配置加载器（读取 super-agent.config.json 等）
+
+// 程序启动时加载全局配置，后续所有模块（模型、渠道、插件等）都基于它初始化
 const config = loadConfig();
 
 /*
