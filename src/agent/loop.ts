@@ -22,8 +22,8 @@ export async function agentLoop(
   system: string,
   tracker?: UsageTracker,
 ) {
-  let step = 0;
-  let totalTokens = 0;
+  let step = 0;// 当前步数
+  let totalTokens = 0;// 累计 token 消耗
   resetHistory();
 
   while (step < MAX_STEPS) {
@@ -35,7 +35,7 @@ export async function agentLoop(
     let shouldBreak = false;
     let lastToolCall: { name: string; input: unknown } | null = null;
     let stepResponse: any;
-    let stepUsage: any;
+    let stepUsage: any; 
 
     for (let attempt = 1; ; attempt++) {
       try {
@@ -75,6 +75,7 @@ export async function agentLoop(
                 `  [调用: ${part.toolName}(${JSON.stringify(part.input)})]`,
               );
 
+              // 循环检测：连续调用同一个工具、传同样的参数——明显是在兜圈子
               const detection = detect(part.toolName, part.input);
               if (detection.stuck) {
                 console.log(`  ${detection.message}`);
