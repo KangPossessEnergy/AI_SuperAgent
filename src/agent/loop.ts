@@ -13,6 +13,8 @@ const MAX_STEPS = 15;
 const MAX_RETRIES = 3;
 const TOKEN_BUDGET = 50000;
 
+
+
 export async function agentLoop(
   model: any,
   registry: ToolRegistry,
@@ -37,6 +39,9 @@ export async function agentLoop(
 
     for (let attempt = 1; ; attempt++) {
       try {
+        // streamText 同步返回结果对象（不等模型生成完）：
+        // - result.fullStream：异步事件流（text-delta / tool-call / tool-result / finish），下面 for await 逐块消费
+        // - result.text / response / usage：Promise，生成结束后取完整文本、响应消息和 token 用量
         const result = streamText({
           model,
           system,
@@ -107,7 +112,7 @@ export async function agentLoop(
           }
         }
 
-        stepResponse = await result.response;
+        stepResponse = await result.response; // 流式输出结束后取本步完整响应：里面带着模型生成的消息（回复文本 + 工具调用/结果）
         stepUsage = await result.usage;
         break;
       } catch (error) {
@@ -129,7 +134,7 @@ export async function agentLoop(
       break;
     }
 
-    messages.push(...stepResponse!.messages);
+    messages.push(...stepResponse!.messages); // 把本步产生的消息原地追加进 messages（调用方传入的同一个数组），作为下一步 streamText 的输入，形成多步对话历史
 
     // 把 usage 喂给 tracker；tracker 内部按四类 token 分别累加并算 cost
     const norm = normalizeUsage(stepUsage);
@@ -177,3 +182,20 @@ export async function agentLoop(
     console.log("\n[达到最大步数]");
   }
 }
+
+/**
+ * while循环的结构：
+ * 调一次 streamText，不设 stopWhen（默认只跑一步）
+ * 遍历 fullStream，收集文本和工具调用
+ * 把这一步的消息追加到 messages
+ * 判断退出条件：如果这一步没有工具调用，说明模型直接给出了文本回复，循环结束
+ * 如果有工具调用，回到步骤 1，模型会看到工具的执行结果，决定下一步做什么
+ * 
+ * 是否进行下一步：有退出条件，根据退出路径会选择结束循环还是继续下一步
+ * 生产环境里，退出条件会复杂得多：
+ * 步数上限：防止模型陷入无限循环（我们这里的 MAX_STEPS）
+ * Token 预算：累计输出超过阈值就强制停止
+ * 重复检测：连续调用同一个工具、传同样的参数——明显是在兜圈子
+ * 用户中断：AbortSignal 随时可以打断
+ * 等等
+ */

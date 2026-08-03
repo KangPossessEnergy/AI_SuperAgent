@@ -331,7 +331,7 @@ export async function startAgent() {
   const cronJobs = cronService.list();
 
   const store = new SessionStore("default");
-  let messages: ModelMessage[] = [];
+  let messages: ModelMessage[] = [];// 会话消息列表（包含用户消息、模型回复、工具调用/结果）
   const timestamps = new Map<number, number>();
   const tracker = new UsageTracker(".usage/today.jsonl");
 
@@ -370,18 +370,18 @@ export async function startAgent() {
       }
 
       const userMsg: ModelMessage = { role: "user", content: trimmed };
-      messages.push(userMsg);
+      messages.push(userMsg);// 将用户消息追加到会话消息列表
       timestamps.set(messages.length - 1, Date.now());
       store.append(userMsg);
 
-      const currentSystem = builder.build(makePromptCtx());
-      const beforeLen = messages.length;
-      await agentLoop(model, registry, messages, currentSystem, tracker);
+      const currentSystem = builder.build(makePromptCtx()); // 构建本轮系统提示词
+      const beforeLen = messages.length; // 记录调用前消息数，用于之后截出本轮新增的消息
+      await agentLoop(model, registry, messages, currentSystem, tracker); // 传入的 messages 会被 loop 原地追加（对应 loop.ts 里 messages.push(...stepResponse.messages)）
 
-      const newMessages = messages.slice(beforeLen);
+      const newMessages = messages.slice(beforeLen); // 截出 agentLoop 追加的消息（模型回复、工具调用/结果）
       const now = Date.now();
-      for (let i = beforeLen; i < messages.length; i++) timestamps.set(i, now);
-      store.appendAll(newMessages);
+      for (let i = beforeLen; i < messages.length; i++) timestamps.set(i, now); // 给新增消息统一打时间戳
+      store.appendAll(newMessages); // 新增消息批量持久化到会话存储
 
       console.log(`  [Token] ~${estimateMessageTokens(messages)} tokens`);
       ask();
