@@ -8,13 +8,13 @@ import {
 } from "./loop-detection.js"; // 循环检测：识别 Agent 重复调用工具的卡死行为
 import { isRetryable, calculateDelay, sleep } from "./retry.js"; // 重试工具：判断是否可重试、计算退避延迟、休眠等待
 import { type UsageTracker, normalizeUsage } from "../usage/tracker.js"; // 用量统计：累计 token 消耗与成本，统一不同厂商的 usage 格式
+import type { LocalTraceRecorder } from "../trace/recorder.js";
 
 // --- 保护阈值 ---
 
-const MAX_STEPS = 15;      // 最大步数上限：防止模型在工具调用间无限循环
-const MAX_RETRIES = 3;     // 单步最大重试次数：网络抖动等临时错误最多重试 3 次
+const MAX_STEPS = 15; // 最大步数上限：防止模型在工具调用间无限循环
+const MAX_RETRIES = 3; // 单步最大重试次数：网络抖动等临时错误最多重试 3 次
 const TOKEN_BUDGET = 50000; // Token 预算：累计 token 超过此值强制停止，控制成本
-
 
 // --- Agent 主循环 ---
 
@@ -30,23 +30,41 @@ export async function agentLoop(
   messages: ModelMessage[],
   system: string,
   tracker?: UsageTracker,
+  tag?: string,
+  maxSteps?: number,
+  signal?: AbortSignal,
+  trace?: LocalTraceRecorder,
 ) {
-  let step = 0;          // 当前步数（每轮模型调用+工具执行算一步）
-  let totalTokens = 0;   // 累计 token 消耗
-  resetHistory();        // 开始新会话前清空循环检测历史，避免上一次的记录干扰本次判断
+  let step = 0; // 当前步数（每轮模型调用+工具执行算一步）
+  let totalTokens = 0; // 累计 token 消耗
+  resetHistory(); // 开始新会话前清空循环检测历史，避免上一次的记录干扰本次判断
+  const prefix = tag ? `  ${tag} ` : "";
+  const stepLimit = maxSteps ?? MAX_STEPS;
 
   // 主循环：每轮 = 一次模型调用 + 若干工具执行
-  while (step < MAX_STEPS) {
+  while (step < stepLimit) {
+    if (signal?.aborted) {
+      if (tag) console.log(`${prefix}已取消`);
+      break;
+    }
+
     step++;
-    console.log(`\n--- Step ${step} ---`);
+
+    if (tag) {
+      console.log(`${prefix}Step ${step}/${stepLimit}`);
+    } else {
+      console.log(`\n--- Step ${step} ---`);
+    }
+
+    await trace?.recordStepStarted({ step, system, messages });
 
     // --- 本步的临时状态 ---
-    let hasToolCall = false;                                  // 本步是否产生了工具调用（决定循环是否继续）
-    let fullText = "";                                        // 本步模型生成的完整文本
-    let shouldBreak = false;                                  // 循环检测触发 critical 时置 true，强制结束
+    let hasToolCall = false; // 本步是否产生了工具调用（决定循环是否继续）
+    let fullText = ""; // 本步模型生成的完整文本
+    let shouldBreak = false; // 循环检测触发 critical 时置 true，强制结束
     let lastToolCall: { name: string; input: unknown } | null = null; // 最近一次工具调用，用于给结果补录指纹
-    let stepResponse: any;                                    // 本步模型完整响应（含 messages）
-    let stepUsage: any;                                       // 本步 token 用量
+    let stepResponse: any; // 本步模型完整响应（含 messages）
+    let stepUsage: any; // 本步 token 用量
 
     // --- 重试循环：网络错误时最多重试 MAX_RETRIES 次 ---
     for (let attempt = 1; ; attempt++) {
@@ -66,7 +84,7 @@ export async function agentLoop(
             因为需要在每一步之间做很多事：打日志、检查 token 用量、判断是不是陷入死循环、决定要不要中断。
           */
           providerOptions: { openai: { parallelToolCalls: true } }, // 允许模型一次性返回多个工具调用
-          onError: () => {},                                        // 流式错误回调：吞掉错误，由外层 try/catch 处理
+          onError: () => {}, // 流式错误回调：吞掉错误，由外层 try/catch 处理
         });
 
         // 遍历异步数据流：数据一块一块地来，每块都要等
@@ -129,9 +147,10 @@ export async function agentLoop(
         }
 
         stepResponse = await result.response; // 流式输出结束后取本步完整响应：里面带着模型生成的消息（回复文本 + 工具调用/结果）
-        stepUsage = await result.usage;       // 取本步 token 用量
+        stepUsage = await result.usage; // 取本步 token 用量
         break; // 成功执行完本步，跳出重试循环
       } catch (error) {
+        await trace?.recordAttemptError(step, attempt, error); // 记录本次尝试的错误  
         // 超过最大重试次数，或错误不可重试（如 4xx），直接抛给上层
         if (attempt > MAX_RETRIES || !isRetryable(error as Error)) throw error;
         const delay = calculateDelay(attempt);
@@ -159,6 +178,12 @@ export async function agentLoop(
 
     // 把 usage 喂给 tracker；tracker 内部按四类 token 分别累加并算 cost
     const norm = normalizeUsage(stepUsage);
+    await trace?.recordStepCompleted({
+      step,
+      text: fullText,
+      outputMessages: stepResponse!.messages,
+      usage: norm,
+    })
     const stepRecord = tracker?.record(model?.modelId || "mock-model", norm);
     totalTokens +=
       norm.inputTokens +
@@ -205,7 +230,7 @@ export async function agentLoop(
   }
 
   // 走到这里说明是 MAX_STEPS 上限截断，而非自然结束
-  if (step >= MAX_STEPS) {
+  if (step >= stepLimit) {
     console.log("\n[达到最大步数]");
   }
 }
@@ -217,7 +242,7 @@ export async function agentLoop(
  * 把这一步的消息追加到 messages
  * 判断退出条件：如果这一步没有工具调用，说明模型直接给出了文本回复，循环结束
  * 如果有工具调用，回到步骤 1，模型会看到工具的执行结果，决定下一步做什么
- * 
+ *
  * 是否进行下一步：有退出条件，根据退出路径会选择结束循环还是继续下一步
  * 生产环境里，退出条件会复杂得多：
  * 步数上限：防止模型陷入无限循环（我们这里的 MAX_STEPS）

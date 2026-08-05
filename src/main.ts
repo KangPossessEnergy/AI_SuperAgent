@@ -87,6 +87,7 @@ import { createAgentCommands } from "./commands/agents"; // 子 Agent 管理命�
 // ===== 配置 =====
 import { SuperAgentConfig } from "./config/schema"; // 配置的 TypeScript 类型定义
 import { loadConfig } from "./config/loader"; // 配置加载器（读取 super-agent.config.json 等）
+import { LocalTraceRecorder } from "./trace/recorder";
 
 // 程序启动时加载全局配置，后续所有模块（模型、渠道、插件等）都基于它初始化
 const config = loadConfig();
@@ -331,7 +332,7 @@ export async function startAgent() {
   const cronJobs = cronService.list();
 
   const store = new SessionStore("default");
-  let messages: ModelMessage[] = [];// 会话消息列表（包含用户消息、模型回复、工具调用/结果）
+  let messages: ModelMessage[] = []; // 会话消息列表（包含用户消息、模型回复、工具调用/结果）
   const timestamps = new Map<number, number>();
   const tracker = new UsageTracker(".usage/today.jsonl");
 
@@ -370,13 +371,39 @@ export async function startAgent() {
       }
 
       const userMsg: ModelMessage = { role: "user", content: trimmed };
-      messages.push(userMsg);// 将用户消息追加到会话消息列表
+      messages.push(userMsg); // 将用户消息追加到会话消息列表
       timestamps.set(messages.length - 1, Date.now());
       store.append(userMsg);
 
       const currentSystem = builder.build(makePromptCtx()); // 构建本轮系统提示词
       const beforeLen = messages.length; // 记录调用前消息数，用于之后截出本轮新增的消息
-      await agentLoop(model, registry, messages, currentSystem, tracker); // 传入的 messages 会被 loop 原地追加（对应 loop.ts 里 messages.push(...stepResponse.messages)）
+
+      const trace = await LocalTraceRecorder.start({
+        sessionId: config.session.id,
+        model: model?.modelId || config.model.name,
+      });
+      try {
+        await agentLoop(
+          model,
+          registry,
+          messages,
+          currentSystem,
+          tracker,
+          undefined,
+          undefined,
+          undefined,
+          trace,
+        ); // 传入的 messages 会被 loop 原地追加（对应 loop.ts 里 messages.push(...stepResponse.messages)）
+        await trace.finish("completed");
+        console.log(`  [Trace] ${trace.filePath}`);
+      } catch (error) {
+        await trace.finish("failed", error);
+        console.error(
+          `  [Agent] ${error instanceof Error ? error.message : String(error)}`,
+        );
+        ask();
+        return;
+      }
 
       const newMessages = messages.slice(beforeLen); // 截出 agentLoop 追加的消息（模型回复、工具调用/结果）
       const now = Date.now();

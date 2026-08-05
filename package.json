@@ -8,7 +8,8 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "init": "tsx src/index.ts init",
-    "continue": "tsx src/index.ts --continue"
+    "continue": "tsx src/index.ts --continue",
+    "trace:inspect": "tsx src/trace/inspect.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.7",
