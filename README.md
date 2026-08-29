@@ -1,276 +1,268 @@
-# 项目结构说明
+# AI Harness SuperAgent
 
-> 本文档基于当前 `src/` 目录的实际结构生成，用于快速了解 Super Agent 各模块的职责划分。
->
-> 当前版本：v0.20 — 已集成配置系统、CLI 入口、Sub-Agent 子代理、Cron 定时任务、Channel 多通道、权限与 Hook 管线等能力。
+一个基于 TypeScript、AI SDK 和工具调用循环构建的本地 CLI Super Agent。它支持文件与 Shell 操作、联网搜索、记忆、RAG、Skill、插件、定时任务、Sub-Agent、Trace，以及飞书消息通道。
 
----
+项目默认适合本地开发、Agent Harness 实验和代码分析 Demo。当模型配置中的 `apiKey` 为空时会使用 Mock Model，仍可启动并体验基础流程。
 
-## 目录概览
+## 能力概览
 
-```
-.
-├── .env                          # 环境变量配置
-├── .gitignore                    # Git 忽略规则
-├── .memory/                      # 项目记忆/历史文档
-│   ├── MEMORY.md
-│   ├── project_db-caution.md
-│   └── user_typescript-preference.md
-├── .sessions/                    # 会话持久化存储（JSONL）
-├── .usage/                       # Token 与成本追踪日志
-├── app/                          # 浏览器预览应用目录
-│   ├── App.tsx
-│   ├── Button.tsx
-│   ├── index.html
-│   └── styles.css
-├── docs/                         # 项目文档与知识库素材
-│   ├── api_design.md
-│   └── deployment-guide.md
-├── package.json                  # 项目依赖与脚本
-├── pnpm-lock.yaml                # pnpm 锁定文件
-├── sample-project/               # 示例项目（用于代码分析 Demo）
-│   ├── api.ts
-│   ├── auth.ts
-│   └── utils.ts
-├── super-agent.config.json       # 本地配置文件（运行 pnpm run init 生成，不提交 Git）
-├── src/                          # 主源码目录
-│   ├── index.ts                  # CLI 入口。根据命令行参数分发 init 或 start。
-│   ├── main.ts                   # Agent 主逻辑。加载配置、初始化模型、注册工具、启动交互循环。
-│   ├── mock-model.ts             # Mock 模型实现
-│   ├── agent/                    # Agent Loop 相关
-│   ├── agents/                   # Sub-Agent 子代理机制
-│   ├── channels/                 # 多通道接入（飞书等）
-│   ├── commands/                 # 终端快捷命令
-│   ├── config/                   # 配置系统
-│   ├── context/                  # Prompt 与上下文管理
-│   ├── cron/                     # 定时任务系统
-│   ├── memory/                   # 记忆持久化与整理
-│   ├── plugins/                  # 插件架构
-│   ├── rag/                      # RAG 检索增强生成
-│   ├── security/                 # 权限、Hook 与风险检测
-│   ├── session/                  # 会话持久化
-│   ├── skills/                   # 领域知识 Skill
-│   ├── tools/                    # 工具系统
-│   └── usage/                    # Prompt Cache 与成本追踪
-├── knowledge.db                  # SQLite 知识库（本地生成，不提交 Git）
-└── tsconfig.json                 # TypeScript 配置
-```
+- **Agent Loop**：模型推理、工具调用、结果回传、Token 预算、重试与循环检测。
+- **内置工具**：文件读写与编辑、目录浏览、本地 `glob`/`grep`、Shell、天气、计算器、网页搜索与抓取。
+- **上下文管理**：Prompt Pipe、上下文视图、Token 估算、压缩和工具结果截断。
+- **记忆系统**：本地记忆存储、检索、TTL 管理和 `/dream` 自动整理。
+- **RAG 知识库**：导入 Markdown 文档，使用向量检索与 BM25 混合搜索。
+- **Sub-Agent**：派生单个或并行子 Agent，并限制嵌套深度、并发数和执行步数。
+- **扩展能力**：Skill 加载器、插件管理器和 MCP 工具注册。
+- **自动化与接入**：Cron 定时任务、飞书长连接 Channel，以及 Channel Dashboard。
+- **安全与可观测性**：owner/collaborator/guest 角色、Bash 风险控制、Hook 管线、Token 用量和 Trace 记录。
 
----
+## 快速开始
 
-## `src/` 目录详解
+### 环境要求
 
-### 入口与模型
+- Node.js 18+
+- pnpm
+- 一个 DashScope API Key（可选；不配置时使用 Mock Model）
 
-| 文件 | 职责 |
-|------|------|
-| `src/index.ts` | CLI 入口。根据 `process.argv[2]` 分发：传入 `init` 时执行初始化向导，否则启动 Agent。 |
-| `src/main.ts` | Agent 主逻辑。调用 `loadConfig()` 加载配置，初始化模型与工具注册表、连接 MCP Server、加载插件与 Skill、启动 Channel 网关和 Cron 服务，进入交互式问答循环。 |
-| `src/mock-model.ts` | Mock 模型实现。在没有真实 API Key 时模拟模型行为，支持天气、文件操作、网页抓取、Vibe Coding 等 Demo 场景。 |
-
-### `src/agent/` — Agent Loop 相关
-
-| 文件 | 职责 |
-|------|------|
-| `src/agent/loop.ts` | Agent 主循环。调用 `streamText`、分发文本/工具调用/工具结果事件、管理 Token 预算与最大步数。 |
-| `src/agent/loop-detection.ts` | 循环检测。通过滑动窗口记录工具调用历史，检测重复调用、乒乓循环，并提供熔断机制。 |
-| `src/agent/retry.ts` | 重试策略。根据错误类型判断是否可重试，并实现指数退避 + 抖动延迟。 |
-
-### `src/agents/` — Sub-Agent 子代理机制
-
-| 文件 | 职责 |
-|------|------|
-| `src/agents/types.ts` | 子代理类型与默认配置。定义 `SubAgentConfig`、`SpawnRequest`、`SubAgentRun` 等类型，默认最大嵌套深度 1、最大并发 3、超时 60s。 |
-| `src/agents/registry.ts` | 子代理注册表。管理所有子代理运行记录，提供 ID 生成、深度与并发检查、状态流转（running/completed/error/timeout）查询。 |
-| `src/agents/spawn.ts` | 子代理执行引擎。实现 `spawnAgent` 单任务执行与 `spawnParallel` 并行派发，支持独立上下文、彩色日志标签、最大 30 步、超时熔断及部分结果返回。 |
-
-### `src/channels/` — 多通道接入
-
-| 文件 | 职责 |
-|------|------|
-| `src/channels/gateway.ts` | Channel 网关。统一管理多个消息通道的生命周期与消息分发。 |
-| `src/channels/feishu.ts` | 飞书通道。基于 Hono 提供 Webhook 接入，让 Agent 可以"活在"飞书群里。 |
-| `src/channels/types.ts` | Channel 抽象类型定义。 |
-
-### `src/config/` — 配置系统
-
-| 文件 | 职责 |
-|------|------|
-| `src/config/schema.ts` | 配置 Schema。使用 Zod v4 定义模型、插件、通道、子代理、安全、记忆、RAG、Cron、会话、用量等配置项，并给出完整默认值。 |
-| `src/config/loader.ts` | 配置加载器。读取 `super-agent.config.json`，替换 `${ENV_VAR}` 形式的环境变量，经 Zod 校验后返回最终配置；文件不存在时回退到默认配置。 |
-| `src/config/init.ts` | 初始化向导。通过交互式问答生成 `super-agent.config.json` 与 `.env`，引导用户配置模型、API Key、飞书 Channel、子代理并发数等。 |
-
-### `src/commands/` — 终端快捷命令
-
-| 文件 | 职责 |
-|------|------|
-| `src/commands/index.ts` | 命令调度器。集中注册并分发所有 `/` 开头的快捷命令。 |
-| `src/commands/channel.ts` | `/channel` 相关命令：查看、启动、停止通道。 |
-| `src/commands/context.ts` | `/context` 相关命令：查看上下文视图、压缩状态。 |
-| `src/commands/cron.ts` | `/cron` 相关命令：查看定时任务与执行日志。 |
-| `src/commands/debug.ts` | `/debug` 调试命令。 |
-| `src/commands/dream.ts` | `/dream` 命令：触发记忆自动整理。 |
-| `src/commands/memory.ts` | `/memory` 相关命令：终端里管理记忆。 |
-| `src/commands/plugin.ts` | `/plugin` 相关命令：加载、卸载、查看插件。 |
-| `src/commands/rag.ts` | `/rag` 相关命令：管理知识库。 |
-| `src/commands/security.ts` | `/role`、`/hooks` 等安全与 Hook 相关命令。 |
-| `src/commands/skill.ts` | `/skill` 相关命令：查看与激活 Skill。 |
-| `src/commands/agents.ts` | `/agents` 命令：查看子 Agent 运行记录、活跃数、最大深度与并发配置。 |
-
-### `src/context/` — Prompt 与上下文管理
-
-| 文件 | 职责 |
-|------|------|
-| `src/context/prompt-builder.ts` | Prompt 构建器。使用 Pipe 模式按需组装 System Prompt，包括核心规则、工具说明、延迟工具列表、会话上下文等。 |
-| `src/context/prompt-pipes.ts` | Prompt Pipe 具体实现。定义 `memoryContext`、`ragContext` 等动静分界线 Pipe。 |
-| `src/context/compressor.ts` | 上下文压缩。提供 `estimateTokens`、`microcompact`、`summarize` 等三层即时防线能力。 |
-| `src/context/defense.ts` | 上下文防御。Token 估算、工具截断与 TTL 修剪等防线实现。 |
-| `src/context/view.ts` | 上下文视图。构建并渲染上下文快照、用量视图。 |
-
-### `src/cron/` — 定时任务系统
-
-| 文件 | 职责 |
-|------|------|
-| `src/cron/service.ts` | Cron 服务。加载、调度、执行定时任务，支持让 Agent 自动运行。 |
-| `src/cron/parser.ts` | Cron 表达式解析。 |
-| `src/cron/store.ts` | 定时任务持久化存储。 |
-| `src/cron/type.ts` | 定时任务类型定义。 |
-
-### `src/memory/` — 记忆持久化与整理
-
-| 文件 | 职责 |
-|------|------|
-| `src/memory/store.ts` | 记忆存储。基于本地文件系统的记忆读写与 TTL 管理。 |
-| `src/memory/search.ts` | 记忆检索。 |
-| `src/memory/validator.ts` | 记忆校验（lint 体检）。 |
-
-### `src/plugins/` — 插件架构
-
-| 文件 | 职责 |
-|------|------|
-| `src/plugins/manager.ts` | 插件管理器。负责插件的加载、卸载与工具注册。 |
-| `src/plugins/types.ts` | 插件类型定义。 |
-| `src/plugins/supabase-plugin.ts` | Supabase 插件示例。 |
-| `src/plugins/telegram-plugin.ts` | Telegram 插件示例（预留扩展）。 |
-
-### `src/rag/` — 检索增强生成
-
-| 文件 | 职责 |
-|------|------|
-| `src/rag/store.ts` | 向量存储抽象。 |
-| `src/rag/sqlite-store.ts` | SQLite + `sqlite-vec` 向量存储实现。 |
-| `src/rag/embedder.ts` | Embedding 生成（DashScope / Mock）。 |
-| `src/rag/chunker.ts` | 文档分块。 |
-| `src/rag/search.ts` | sqlite-vec + BM25 混合检索。 |
-
-### `src/security/` — 权限、Hook 与风险检测
-
-| 文件 | 职责 |
-|------|------|
-| `src/security/roles.ts` | 三级角色权限：admin / editor / viewer。 |
-| `src/security/bash-classifier.ts` | Bash 命令风险检测。 |
-| `src/security/hooks.ts` | Hook 管线。支持 pre/post 工具调用钩子，用于审计、改写、拦截等。 |
-
-### `src/session/` — 会话持久化
-
-| 文件 | 职责 |
-|------|------|
-| `src/session/store.ts` | 会话存储。以 JSONL 形式保存和恢复对话消息，支持 `--continue` 参数恢复上次会话。 |
-
-### `src/skills/` — 领域知识 Skill
-
-| 文件 | 职责 |
-|------|------|
-| `src/skills/loader.ts` | Skill 加载器。读取本地 Skill 目录，为 Agent 注入领域知识。 |
-
-### `src/tools/` — 工具系统
-
-| 文件 | 职责 |
-|------|------|
-| `src/tools/registry.ts` | 工具注册表。定义 `ToolDefinition` 类型，管理内置工具与 MCP 工具，负责延迟工具发现、并发锁、Token 估算、结果截断及角色权限。 |
-| `src/tools/mcp-client.ts` | MCP 客户端。实现基于 stdio 的 MCP 协议通信，包括真实子进程客户端和 Mock 客户端。 |
-| `src/tools/index.ts` | 工具汇总导出。集中导入并导出所有内置工具，供入口文件统一注册。 |
-| `src/tools/file-tools.ts` | 文件类工具。包括 `read_file`、`write_file`、`edit_file`、`list_directory`。 |
-| `src/tools/search-tools.ts` | 本地搜索工具。包括 `glob`、`grep`，用于在本地文件系统中搜索文件和文本。 |
-| `src/tools/web-search.ts` | 网络搜索工具。包括 `web_search`（Tavily / Serper）、`web_fetch`，用于联网检索和抓取网页。 |
-| `src/tools/shell-tools.ts` | Shell 类工具。包括 `bash`，用于执行本地 shell 命令。 |
-| `src/tools/utility-tools.ts` | 通用工具。包括 `get_weather`、`calculator` 等辅助工具。 |
-| `src/tools/tool-search.ts` | 工具搜索。解决"工具太多模型选不准"的问题。 |
-| `src/tools/memory-tools.ts` | 记忆类工具。供 Agent 读取、写入、搜索记忆。 |
-| `src/tools/rag-tools.ts` | RAG 类工具。供 Agent 检索知识库。 |
-| `src/tools/cron-tools.ts` | Cron 类工具。供 Agent 创建、删除、查看定时任务。 |
-| `src/tools/spawn-tools.ts` | 子代理工具。提供 `spawn_agent`，支持派发单个子 Agent 或并行派发多个子 Agent 执行任务。 |
-
-### `src/usage/` — Prompt Cache 与成本追踪
-
-| 文件 | 职责 |
-|------|------|
-| `src/usage/tracker.ts` | 用量追踪。记录 Token 消耗、Prompt Cache 命中与成本估算。 |
-
----
-
-## 模块依赖关系
-
-```
-┌─────────────────┐
-│   src/index.ts  │
-└────────┬────────┘
-         │
-    ┌────┴────┬──────────────┬───────────────┬──────────────┬─────────────┐
-    ▼         ▼              ▼               ▼              ▼             ▼
-┌────────┐ ┌──────────┐ ┌─────────────┐ ┌──────────────┐ ┌────────┐ ┌──────────┐
-│ agent/ │ │  tools/  │ │  session/   │ │   context/   │ │ cron/  │ │ channels/│
-└────────┘ └──────────┘ └─────────────┘ └──────────────┘ └────────┘ └──────────┘
-    │            │              │              │                │
-    ▼            ▼              ▼              ▼                ▼
-┌────────┐  ┌──────────┐  ┌───────────┐  ┌─────────────┐  ┌──────────────┐
-│ mock-  │  │ MCPClient│  │ memory/   │  │  security/  │  │   plugins/   │
-│ model  │  │ Registry │  │ rag/      │  │  skills/    │  │   usage/     │
-└────────┘  └──────────┘  └───────────┘  └─────────────┘  └──────────────┘
-    │                              │
-    ▼                              ▼
-┌─────────┐              ┌───────────────┐
-│ config/ │              │   agents/     │
-│ loader  │              │  Sub-Agent    │
-└─────────┘              └───────────────┘
-```
-
----
-
-## 常用脚本
+### 安装
 
 ```bash
-# 初始化配置文件
+git clone <your-repository-url>
+cd AI_Harness_SuperAgent_kkdw
+pnpm install
+```
+
+### 初始化配置
+
+推荐使用交互式向导：
+
+```bash
 pnpm run init
+```
 
-# 直接运行
+向导会生成：
+
+- `super-agent.config.json`：模型、插件、Channel、Sub-Agent、安全策略等配置。
+- `.env`：API Key 和飞书凭据等敏感信息。
+
+也可以只设置环境变量后直接启动：
+
+```bash
+export DASHSCOPE_API_KEY="your-api-key"
 pnpm start
+```
 
-# 恢复上次会话继续对话
+启动后，在 `You:` 提示符输入问题；输入 `exit` 退出。
+
+### 会话脚本
+
+```bash
 pnpm run continue
 ```
 
----
+当前 CLI 的会话 ID 默认是 `default`，消息会持久化到 `.sessions/default.jsonl`。`continue` 脚本已预留，但当前启动入口尚未调用 `SessionStore.load()`，因此现阶段运行效果与 `pnpm start` 相同，不会自动把历史消息放回当前上下文。
 
-## 快捷命令
+## 配置
 
-运行 `pnpm start` 后，在终端中可使用以下 `/` 命令：
+配置文件名固定为 `super-agent.config.json`。文件中的字符串支持 `${ENV_VAR}` 形式的环境变量替换。不存在配置文件时，程序会使用 Schema 默认值启动。
 
-| 命令 | 说明 |
-|------|------|
-| `/role [admin\|editor\|viewer]` | 查看或切换当前角色 |
-| `/hooks` | 查看 Hook 管线状态 |
-| `/memory ...` | 管理记忆 |
-| `/rag ...` | 管理知识库 |
-| `/dream` | 触发记忆自动整理 |
-| `/skill ...` | 查看与激活 Skill |
-| `/plugin ...` | 加载、卸载、查看插件 |
-| `/channel ...` | 管理消息通道 |
-| `/cron` / `/cron logs` | 查看定时任务与执行日志 |
-| `/agents` | 查看子 Agent 运行记录与并发/深度配置 |
-| `/context` | 查看上下文视图 |
-| `/debug` | 调试信息 |
+一个最小配置示例：
 
----
+```json
+{
+  "model": {
+    "provider": "dashscope",
+    "name": "qwen-plus-latest",
+    "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "apiKey": "${DASHSCOPE_API_KEY}"
+  },
+  "agents": {
+    "maxSpawnDepth": 1,
+    "maxConcurrent": 3,
+    "defaultTimeout": 60000
+  },
+  "channels": {
+    "feishu": {
+      "enabled": false,
+      "appId": "${FEISHU_APP_ID}",
+      "appSecret": "${FEISHU_APP_SECRET}",
+      "port": 3000
+    }
+  }
+}
+```
 
-> 注：本结构文档根据当前代码目录生成。新增模块或命令时，建议同步更新此文档。
+主要配置项：
+
+| 配置项 | 作用 | 默认值 |
+| --- | --- | --- |
+| `model.name` | 模型名称 | `qwen-plus-latest` |
+| `model.baseURL` | OpenAI 兼容接口地址 | DashScope 兼容接口 |
+| `model.apiKey` | API Key 或环境变量引用 | 空，使用 Mock Model |
+| `plugins` | 按名称启用插件 | `[]` |
+| `agents.maxSpawnDepth` | Sub-Agent 最大嵌套深度 | `1` |
+| `agents.maxConcurrent` | Sub-Agent 最大并发数 | `3` |
+| `security.auditLog` | 开启文件写入审计 Hook | `true` |
+| `security.bashTimestamp` | 给 Bash 输出增加时间戳 | `true` |
+| `rag.docsDir` | 知识库文档目录 | `docs` |
+| `cron.dataDir` | Cron 数据目录 | `.` |
+| `session.id` | 会话标识 | `default` |
+| `usage.trackingFile` | Token 用量记录文件 | `.usage/today.jsonl` |
+
+### DashScope Embedding
+
+RAG 的 Embedding 实现会单独检查 `DASHSCOPE_API_KEY`。设置该环境变量后使用 DashScope Embedding；未设置时使用 Mock Embedder。
+
+## 交互命令
+
+运行 `pnpm start` 后可使用以下命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `/role` | 查看当前角色 |
+| `/role owner` | 切换为 `owner` 角色 |
+| `/role collaborator` | 切换为 `collaborator` 角色，禁止 `bash` |
+| `/role guest` | 切换为只读/低风险工具角色 |
+| `/memory` | 查看已加载的记忆 |
+| `/memory search <query>` | 搜索记忆 |
+| `/rag` | 查看知识库片段和来源 |
+| `ingest <path>` | 导入指定文档到知识库 |
+| `/dream` | 触发记忆整理 |
+| `/skill` 或 `/skill list` | 查看 Skill |
+| `/skill load <name>` | 激活 Skill |
+| `/skill unload <name>` | 停用 Skill |
+| `/<skill-name> ...` | 激活 Skill 并执行一次任务 |
+| `/plugin` 或 `/plugin list` | 查看插件 |
+| `/plugin load <name>` | 加载插件 |
+| `/plugin unload <name>` | 卸载插件 |
+| `/channel` 或 `/channel list` | 查看已注册 Channel |
+| `/cron` 或 `/cron list` | 查看定时任务 |
+| `/cron logs` | 查看最近执行记录 |
+| `/agents` | 查看 Sub-Agent 运行记录 |
+| `/context` | 查看当前上下文 |
+| `/usage` | 查看用量统计 |
+| `/hooks` | 查看 Hook 管线 |
+| `/debug` | 查看调试信息 |
+| `/cache on` / `/cache off` | 开关 Mock Model 的缓存模拟 |
+| `exit` | 停止服务并退出 |
+
+## Skill、插件与 Channel
+
+### Skill
+
+Skill 放在 `.skills/<skill-name>/SKILL.md`。项目已提供示例：
+
+- `.skills/code-review/SKILL.md`
+- `.skills/research/SKILL.md`
+
+Skill 会被加载器发现，激活后其内容会注入 Agent System Prompt。
+
+### 插件
+
+当前内置插件注册表包含 `supabase`。在配置中启用后，插件会注册：
+
+- `list_tables`
+- `query`
+- `insert`
+
+未配置 `SUPABASE_URL` 和 `SUPABASE_KEY` 时，Supabase 插件使用 Mock 数据。
+
+### 飞书 Channel
+
+在 `super-agent.config.json` 中启用 `channels.feishu`，并配置：
+
+```bash
+export FEISHU_APP_ID="your-app-id"
+export FEISHU_APP_SECRET="your-app-secret"
+```
+
+启动后会建立飞书长连接，并在 `http://localhost:3000` 提供 Dashboard。Dashboard 同时提供：
+
+- `GET /health` 健康检查
+- `POST /webhook/feishu` 模拟消息入口
+
+端口可通过 `channels.feishu.port` 修改。
+
+## 数据与生成文件
+
+以下目录或文件由程序在本地生成，已加入 Git 忽略规则：
+
+| 路径 | 内容 |
+| --- | --- |
+| `.memory/` | 项目记忆 |
+| `.sessions/` | 会话 JSONL |
+| `.usage/` | Token 与成本追踪 |
+| `.cron/` | Cron 任务和执行记录 |
+| `.traces/` | Agent Trace |
+| `knowledge.db` | SQLite RAG 存储实现使用时生成；当前启动入口默认使用内存存储 |
+| `super-agent.config.json` | 本地配置 |
+| `.env` | 敏感环境变量 |
+
+查看 Trace：
+
+```bash
+pnpm run trace:inspect -- .traces/<trace-file>
+```
+
+## 项目结构
+
+```text
+.
+├── app/                 # 浏览器预览应用
+├── docs/                # RAG 默认导入的 Markdown 文档
+├── sample-project/      # 代码分析示例项目
+├── .skills/             # 本地 Skill
+├── src/
+│   ├── agent/           # Agent Loop、重试和循环检测
+│   ├── agents/          # Sub-Agent 注册与派生
+│   ├── channels/        # Channel 抽象、网关和飞书实现
+│   ├── commands/        # CLI 斜杠命令
+│   ├── config/          # Schema、加载器和初始化向导
+│   ├── context/         # Prompt、上下文防御和压缩
+│   ├── cron/            # 定时任务
+│   ├── memory/          # 记忆存储与检索
+│   ├── plugins/         # 插件管理和内置插件
+│   ├── rag/             # 分块、Embedding、向量存储和混合检索
+│   ├── security/        # 角色、Bash 分类器和 Hook
+│   ├── session/         # 会话持久化
+│   ├── skills/          # Skill 加载
+│   ├── tools/           # 内置工具、MCP 和工具注册表
+│   ├── trace/           # Trace 记录与查看
+│   ├── usage/           # 用量追踪
+│   ├── index.ts         # CLI 入口
+│   └── main.ts          # 启动和装配所有运行时组件
+├── package.json
+└── tsconfig.json
+```
+
+核心运行链路：
+
+```text
+CLI -> 配置加载 -> 模型初始化 -> 工具注册 -> Prompt 构建
+                                   ├── Memory / RAG / Skill
+                                   ├── Plugin / MCP
+                                   ├── Channel Gateway
+                                   └── Cron / Sub-Agent
+```
+
+## 开发脚本
+
+| 命令 | 作用 |
+| --- | --- |
+| `pnpm start` | 启动 Agent CLI |
+| `pnpm run init` | 运行初始化向导 |
+| `pnpm run continue` | 启动默认会话（恢复逻辑尚未接入） |
+| `pnpm run trace:inspect -- <file>` | 查看 Trace 文件 |
+
+## 当前实现边界
+
+- MCP 当前通过 `MockMCPClient` 注册 GitHub Mock 工具，尚未在启动流程中连接真实 MCP Server。
+- Telegram 插件文件已预留，但当前未实现实际 Bot Channel。
+- 当前 `main.ts` 使用内存 `VectorStore` 装配 RAG；`SqliteVectorStore` 已实现但尚未接入启动链路，因此知识库不会跨进程持久化。
+- `continue` 命令和 `session.id` 配置字段已存在，但历史消息恢复尚未接入当前启动流程。
+- `app/` 是独立的浏览器预览目录，不是 CLI Agent 的启动入口。
+- 生产部署、数据库迁移和 REST API 规范不属于当前 CLI 的实际运行链路；相关草稿见 `docs/`，使用前请以源码为准。
+
+## 相关文档
+
+- [学习文档](Learn-docs/Chapter1：Startup%20+%20Agent%20Loop//Section1.md)
