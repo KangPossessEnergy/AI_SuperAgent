@@ -204,12 +204,155 @@ export FEISHU_APP_SECRET="your-app-secret"
 pnpm run trace:inspect -- .traces/<trace-file>
 ```
 
+## 架构设计
+
+项目采用“多入口、单核心、能力可插拔”的分层结构：
+
+```mermaid
+flowchart TB
+  subgraph Entry["接入层"]
+    CLI["CLI / REPL<br/>src/index.ts"]
+    Feishu["飞书 Channel<br/>src/channels/feishu.ts"]
+    Cron["Cron 定时任务<br/>src/cron/service.ts"]
+  end
+
+  subgraph Core["Agent Core"]
+    Dispatch["Command Dispatcher<br/>斜杠命令"]
+    Prompt["PromptBuilder<br/>System Prompt"]
+    Loop["Agent Loop<br/>模型调用与多步循环"]
+    Registry["ToolRegistry<br/>工具发现与执行编排"]
+  end
+
+  subgraph Capability["能力层"]
+    Model["Model Provider<br/>DashScope / OpenAI 兼容 / Mock"]
+    Builtin["内置工具"]
+    Ext["Skill / Plugin / MCP"]
+    Memory["Memory"]
+    RAG["RAG"]
+    Security["Role / Hook / Bash Risk"]
+  end
+
+  subgraph State["状态与观测"]
+    Session["Session Store"]
+    Usage["Usage Tracker"]
+    Trace["Trace Recorder"]
+    CronStore["Cron Store"]
+  end
+
+  CLI --> Dispatch
+  CLI --> Loop
+  Feishu --> Loop
+  Cron --> Loop
+  Dispatch --> Prompt
+  Loop --> Prompt
+  Prompt --> Memory
+  Prompt --> RAG
+  Prompt --> Ext
+  Loop --> Model
+  Loop --> Registry
+  Registry --> Builtin
+  Registry --> Ext
+  Registry --> Security
+  CLI --> Session
+  CLI --> Usage
+  CLI --> Trace
+  Cron --> CronStore
+```
+
+### 启动装配顺序
+
+`src/main.ts` 在启动时按以下顺序组装运行时：
+
+1. `loadConfig()` 读取 `super-agent.config.json`，替换环境变量并用 Zod 校验。
+2. 根据 `model` 配置创建 DashScope/OpenAI 兼容模型；无 `apiKey` 时创建 Mock Model。
+3. 创建 `ToolRegistry`，注册内置工具、工具搜索、记忆、RAG、Cron 和 Sub-Agent 工具。
+4. 初始化 `MemoryStore`、RAG Store、`SkillLoader`、`PluginManager` 和安全 `HookPipeline`。
+5. 注册 GitHub Mock MCP 工具，并按配置加载插件。
+6. 创建 `PromptBuilder`，将核心规则、工具说明、记忆、RAG、Skill 和会话上下文组装成 System Prompt。
+7. 创建 `ChannelGateway`，按配置启动飞书 Channel。
+8. 加载并启动 Cron 服务。
+9. 创建 CLI 会话、用量追踪和 Trace 记录器，进入 REPL。
+
+### 一次请求的处理流程
+
+不论请求来自 CLI、飞书还是 Cron，核心处理都围绕 `agentLoop()` 展开：
+
+```text
+用户输入 / Channel 消息 / Cron Prompt
+                │
+                ▼
+       入口适配器建立消息上下文
+                │
+                ├── CLI 斜杠命令？── 是 ──> Command Dispatcher
+                │                           │
+                │                           └── 执行管理操作并返回
+                ▼
+       PromptBuilder 构建 System Prompt
+                │
+                ▼
+       Agent Loop 调用模型 streamText()
+                │
+                ├── 直接生成文本 ───────────────┐
+                │                              │
+                └── 产生工具调用                │
+                       │                       │
+                       ▼                       │
+              ToolRegistry 执行工具             │
+                       │                       │
+                       ├── Role 权限过滤        │
+                       ├── Bash 风险分类        │
+                       ├── Pre Hook             │
+                       ├── 读写并发锁           │
+                       ├── 工具执行             │
+                       ├── 结果截断             │
+                       └── Post Hook            │
+                               │               │
+                               └── 工具结果回传 ┘
+                                       │
+                                       ▼
+                              下一步模型调用
+```
+
+Agent Loop 的默认保护阈值：
+
+| 机制 | 默认值 | 作用 |
+| --- | --- | --- |
+| 单次最大步数 | `15` | 防止模型在工具调用间无限循环 |
+| 单步最大重试 | `3` | 对可重试错误使用退避和抖动 |
+| Token 预算 | `50000` | 超过预算后停止当前任务 |
+| 工具结果默认截断 | `3000` 字符 | 控制工具结果对上下文的占用 |
+| 循环检测 | 滑动调用历史 | 识别重复调用和无进展循环 |
+
+### 核心模块职责
+
+| 层级 | 模块 | 主要职责 |
+| --- | --- | --- |
+| 入口层 | `src/index.ts` | 分发 `init` 或启动 Agent |
+| 编排层 | `src/main.ts` | 初始化并连接所有运行时组件 |
+| Agent Core | `src/agent/loop.ts` | 驱动模型调用、工具调用、多步循环和停止条件 |
+| 上下文层 | `src/context/` | 组装 Prompt、注入记忆/RAG/Skill、估算和压缩上下文 |
+| 工具层 | `src/tools/` | 定义内置工具、MCP 工具和工具发现机制 |
+| 工具编排 | `src/tools/registry.ts` | 权限、延迟工具、Hook、风险检测、并发锁和结果截断 |
+| 扩展层 | `src/skills/`、`src/plugins/` | 加载领域 Skill 和可插拔工具能力 |
+| 数据层 | `src/memory/`、`src/rag/`、`src/session/`、`src/cron/` | 管理记忆、知识库、会话和定时任务状态 |
+| 接入层 | `src/channels/` | 为消息平台提供统一的 Channel Gateway |
+| 观测层 | `src/trace/`、`src/usage/` | 记录执行 Trace、Token 用量和成本 |
+
+### 状态边界
+
+- **CLI 会话**：由 `SessionStore` 写入 `.sessions/default.jsonl`；当前启动流程会写入消息，但尚未自动加载历史消息。
+- **Channel 会话**：`ChannelGateway` 按 `channel:senderId` 建立独立消息数组，当前保存在进程内存中。
+- **Cron 状态**：由 `CronService` 和 `CronStore` 管理，任务可触发独立的 Agent Prompt。
+- **记忆状态**：写入 `.memory/`，通过 Memory 工具和 Prompt Pipe 提供给 Agent。
+- **RAG 状态**：当前 `main.ts` 使用内存 `VectorStore`；SQLite 实现位于 `src/rag/sqlite-store.ts`，尚未接入默认启动链路。
+
 ## 项目结构
 
 ```text
 .
 ├── app/                 # 浏览器预览应用
 ├── docs/                # RAG 默认导入的 Markdown 文档
+├── Learn-docs/          # Agent 启动、Agent Loop 等架构学习文档
 ├── sample-project/      # 代码分析示例项目
 ├── .skills/             # 本地 Skill
 ├── src/
@@ -235,16 +378,6 @@ pnpm run trace:inspect -- .traces/<trace-file>
 └── tsconfig.json
 ```
 
-核心运行链路：
-
-```text
-CLI -> 配置加载 -> 模型初始化 -> 工具注册 -> Prompt 构建
-                                   ├── Memory / RAG / Skill
-                                   ├── Plugin / MCP
-                                   ├── Channel Gateway
-                                   └── Cron / Sub-Agent
-```
-
 ## 开发脚本
 
 | 命令 | 作用 |
@@ -265,4 +398,4 @@ CLI -> 配置加载 -> 模型初始化 -> 工具注册 -> Prompt 构建
 
 ## 相关文档
 
-- [学习文档](Learn-docs/Chapter1：Startup%20+%20Agent%20Loop//Section1.md)
+- [学习文档](Learn-docs/)
