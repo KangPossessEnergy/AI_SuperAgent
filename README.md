@@ -1,8 +1,14 @@
 # AI Harness SuperAgent
 
-一个基于 TypeScript、AI SDK 和工具调用循环构建的本地 CLI Super Agent。它支持文件与 Shell 操作、联网搜索、记忆、RAG、Skill、插件、定时任务、Sub-Agent、Trace，以及飞书消息通道。
+一个基于 TypeScript、AI SDK 和工具调用循环构建的本地 CLI Super Agent。它能接飞书、有记忆、有 RAG、有工具系统、能装插件、能派子 Agent 的生产级 Super Agent，核心能力对齐 OpenClaw。
 
-项目默认适合本地开发、Agent Harness 实验和代码分析 Demo。当模型配置中的 `apiKey` 为空时会使用 Mock Model，仍可启动并体验基础流程。
+```bash
+技术栈：
+1 TypeScript + Node.js (ESM)
+2 Vercel AI SDK
+3 Hono (HTTP + WebSocket)
+4 JSONL (Session 持久化)
+```
 
 ## 能力概览
 
