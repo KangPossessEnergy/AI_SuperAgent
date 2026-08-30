@@ -1,40 +1,41 @@
-import { streamText, stepCountIs, type ModelMessage } from "ai";
-import { ToolRegistry } from "../tools/registry.js";
+import { streamText, stepCountIs, type ModelMessage } from "ai"; // AI SDK：流式调用模型
+import { ToolRegistry } from "../tools/registry.js"; // 工具注册中心
 import {
   detect,
   recordCall,
   recordResult,
   resetHistory,
-} from "./loop-detection.js";
-import { isRetryable, calculateDelay, sleep } from "./retry.js";
-import { type UsageTracker, normalizeUsage } from "../usage/tracker.js";
-import type { LocalTraceRecorder } from "../trace/recorder.js";
+} from "./loop-detection.js"; // 循环检测：识别重复调工具的卡死行为
+import { isRetryable, calculateDelay, sleep } from "./retry.js"; // 重试：错误分类、退避延迟、休眠
+import { type UsageTracker, normalizeUsage } from "../usage/tracker.js"; // token 用量统计
+import type { LocalTraceRecorder } from "../trace/recorder.js"; // 本地 trace 记录器
 
 const MAX_STEPS = 15; // 最大步数上限：防止模型在工具调用间无限循环
 const MAX_RETRIES = 3; // 单步最大重试次数：网络抖动等临时错误最多重试 3 次
-const TOKEN_BUDGET = 50000; // Token 预算：累计 token 超过此值强制停止，控制成本
+const TOKEN_BUDGET = 50000; // Token 预算：累计超过此值强制停止，控制成本
 
-// Agent 主循环：每轮 = 一次模型调用 + 若干工具执行，直到模型给出纯文本回复，或触发停止条件（步数上限 / Token 预算 / 循环熔断 / 用户取消）
+// Agent 主循环：每轮 = 一次模型调用 + 若干工具执行，把生成的消息追加回 messages 形成多步对话
+// 退出条件：模型给出纯文本回复（无工具调用）/ 达到步数上限 / Token 预算耗尽 / 循环检测熔断 / 外部取消
 export async function agentLoop(
-  model: any, // model: 模型实例（AI SDK 的 LanguageModel）
-  registry: ToolRegistry, // registry: 工具注册中心，提供 toAISDKFormat() 供 streamText 使用
-  messages: ModelMessage[], // messages: 对话历史数组（引用类型，调用方共享，原地追加）
-  system: string, // system: 系统提示词
-  tracker?: UsageTracker, // tracker: 可选，用量统计器，累计 token 消耗与成本
-  tag?: string, // tag: 可选，日志前缀标签，用于区分子 agent 的输出
-  maxSteps?: number, // maxSteps: 可选，覆盖默认的 MAX_STEPS 步数上限
-  signal?: AbortSignal, // signal: 可选，外部中断信号，随时取消循环
-  trace?: LocalTraceRecorder, // trace: 可选，本地 trace 记录器，落盘每步输入输出
+  model: any,
+  registry: ToolRegistry,
+  messages: ModelMessage[],
+  system: string,
+  tracker?: UsageTracker,
+  tag?: string,
+  maxSteps?: number,
+  signal?: AbortSignal,
+  trace?: LocalTraceRecorder,
 ) {
   let step = 0; // 当前步数（每轮模型调用 + 工具执行算一步）
   let totalTokens = 0; // 累计 token 消耗
-  resetHistory(); // 清空循环检测历史，避免上一次会话的记录干扰本次判断
+  resetHistory(); // 清空循环检测历史，避免上一次会话干扰本次判断
   const prefix = tag ? `  ${tag} ` : "";
   const stepLimit = maxSteps ?? MAX_STEPS;
 
   // 主循环：每轮 = 一次模型调用 + 若干工具执行
   while (step < stepLimit) {
-    // 外部请求取消（如用户按 Ctrl+C），直接退出
+    // 外部请求取消（如用户中断），直接退出
     if (signal?.aborted) {
       if (tag) console.log(`${prefix}已取消`);
       break;
@@ -61,7 +62,8 @@ export async function agentLoop(
     // 重试循环：可重试错误（网络抖动、5xx 等）最多重试 MAX_RETRIES 次
     for (let attempt = 1; ; attempt++) {
       try {
-        // 手动循环而非 SDK 自动循环（stopWhen）：把每步控制权留在自己手里，才能在步间打日志、控预算、做循环检测、响应中断
+        // 手动循环而非 SDK 自动循环（stopWhen）：把每步控制权留在自己手里，
+        // 才能在步间打日志、控预算、做循环检测、响应中断
         const result = streamText({
           model,
           system,
@@ -96,7 +98,7 @@ export async function agentLoop(
                   // 严重级别：标记停止，不再给模型机会
                   shouldBreak = true;
                 } else {
-                  // 警告级别：不停止，但塞一条系统提醒引导模型换思路
+                  // 警告级别：不停止，塞一条系统提醒引导模型换思路
                   messages.push({
                     role: "user" as const,
                     content: `[系统提醒] ${detection.message}。请换一个思路解决问题，不要重复同样的操作。`,
