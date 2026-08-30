@@ -14,18 +14,17 @@ const MAX_STEPS = 15; // 最大步数上限：防止模型在工具调用间无�
 const MAX_RETRIES = 3; // 单步最大重试次数：网络抖动等临时错误最多重试 3 次
 const TOKEN_BUDGET = 50000; // Token 预算：累计超过此值强制停止，控制成本
 
-// Agent 主循环：每轮 = 一次模型调用 + 若干工具执行，把生成的消息追加回 messages 形成多步对话
-// 退出条件：模型给出纯文本回复（无工具调用）/ 达到步数上限 / Token 预算耗尽 / 循环检测熔断 / 外部取消
+// Agent 主循环
 export async function agentLoop(
-  model: any,
-  registry: ToolRegistry,
-  messages: ModelMessage[],
-  system: string,
-  tracker?: UsageTracker,
-  tag?: string,
-  maxSteps?: number,
-  signal?: AbortSignal,
-  trace?: LocalTraceRecorder,
+ model: any, // model: 模型实例（AI SDK 的 LanguageModel）
+  registry: ToolRegistry, // registry: 工具注册中心，提供 toAISDKFormat() 供 streamText 使用
+  messages: ModelMessage[], // messages: 对话历史数组（引用类型，调用方共享，原地追加）
+  system: string, // system: 系统提示词
+  tracker?: UsageTracker, // tracker: 可选，用量统计器，累计 token 消耗与成本
+  tag?: string, // tag: 可选，日志前缀标签，用于区分子 agent 的输出
+  maxSteps?: number, // maxSteps: 可选，覆盖默认的 MAX_STEPS 步数上限
+  signal?: AbortSignal, // signal: 可选，外部中断信号，随时取消循环
+  trace?: LocalTraceRecorder, // trace: 可选，本地 trace 记录器，落盘每步输入输出
 ) {
   let step = 0; // 当前步数（每轮模型调用 + 工具执行算一步）
   let totalTokens = 0; // 累计 token 消耗
