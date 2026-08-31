@@ -406,5 +406,5 @@ Agent Loop 的默认保护阈值：
 
 - [学习文档](Learn-docs/)
 
-## 课程来于三元老师的superagent课程，本项目为学员学习笔记
+## 课程来于三元老师的superagent课程，本github项目为学员学习笔记
 [super-agent]: https://sitor.cc/courses/super-agent/
